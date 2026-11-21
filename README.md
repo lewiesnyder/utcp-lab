@@ -6,74 +6,152 @@ A small, hands-on introduction to the **Universal Tool Calling Protocol (UTCP)**
 
 This lab demonstrates how an AI tool client can **discover and invoke an existing REST API without an MCP server**.
 
-- **Native API:** A FastAPI endpoint (`GET /multiply`) performs a simple calculation.
-- **UTCP manual:** A second endpoint (`GET /utcp`) describes the tool, its inputs/outputs, and how to call the API.
-- **Discovery and execution:** A Python UTCP client reads the manual and invokes the API using its native HTTP interface.
+- **Native API:** FastAPI endpoints (`GET /multiply`, `GET /divide`) perform simple calculations.
+- **UTCP manual:** `GET /utcp` describes both tools, their inputs/outputs, and how to call the APIs.
+- **Discovery and execution:** A Python UTCP client reads the manual and invokes operations using the native HTTP interface.
 
 Unlike an MCP wrapper, the UTCP manual provides tool metadata and invocation instructions; it does **not** proxy every tool call. This example uses an explicit UTCP manual rather than OpenAPI auto-discovery.
+
+The repo includes **three ways to exercise the same provider**, from a plain UTCP client call through LangChain agents with increasing automation.
 
 ## Project structure
 
 ```text
 utcp-lab/
-├── app.py       # FastAPI service and UTCP manual
-├── client.py    # UTCP discovery and tool invocation
+├── app.py                 # FastAPI service, REST endpoints, and UTCP manual
+├── client.ipynb           # Minimal UTCP client (discover + call multiply)
+├── langchain_agent.ipynb  # LangChain agents: manual @tool vs auto-discovery
 ├── pyproject.toml
 └── README.md
 ```
 
 ## Getting started
 
-**Prerequisites:** Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+**Prerequisites:** Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
-From the project directory, install dependencies:
+Install dependencies:
 
 ```bash
 uv sync
 ```
 
+For the LangChain notebooks, you also need a **local OpenAI-compatible LLM**. The examples assume [Ollama](https://ollama.com/) at `http://localhost:11434` with a model such as `qwen3.8:27b`. Adjust the model name in `langchain_agent.ipynb` to match what you have installed.
+
+**Note:** `langchain-utcp-adapters` on PyPI still declares a dependency on LangChain 0.3.x. This project uses a `[tool.uv] override-dependencies` entry in `pyproject.toml` so it can run with LangChain 1.x and `langchain-core` 1.8+.
+
 ## Usage
 
-**1. Start the FastAPI server** in one terminal:
+### 1. Start the API
+
+In one terminal:
 
 ```bash
 uv run uvicorn app:app --reload
 ```
 
-The service is available at `http://127.0.0.1:8000`.
+The service listens at `http://127.0.0.1:8000`.
 
-**2. Inspect the REST API and UTCP manual** (optional):
+### 2. Inspect the API and manual (optional)
 
 ```bash
 curl 'http://127.0.0.1:8000/multiply?x=6&y=7'
+curl 'http://127.0.0.1:8000/divide?x=42&y=6'
 curl 'http://127.0.0.1:8000/utcp'
 ```
 
-The REST endpoint returns:
+Example multiply response:
 
 ```json
-{"result":42}
+{"result": 42}
 ```
 
-**3. Run the UTCP client** in a second terminal:
+### 3. Run the examples (notebooks)
+
+`uv run jupyter …` starts the **Jupyter server** from this project’s `.venv`, but each notebook runs in a separate **kernel** process. That kernel is chosen from kernels registered on your machine (`jupyter kernelspec list`), not automatically from the server’s venv.
+
+If imports like `utcp` or `langchain_utcp_adapters` fail, the notebook is almost certainly using the wrong kernel (often the user-wide `python3` spec, which may point at another project’s venv).
+
+**One-time setup** — register a kernel that uses this repo’s interpreter:
 
 ```bash
-uv run python client.py
+uv run python -m ipykernel install --user --name utcp-lab --display-name "utcp-lab (.venv)"
 ```
 
-The client discovers the `multiply` tool from `/utcp` and invokes it with `x=6` and `y=7`. The returned result contains `42` (the exact console representation depends on the SDK version).
+Then start Jupyter from the project directory:
+
+```bash
+uv run jupyter lab
+# or: uv run jupyter notebook
+```
+
+In Jupyter Lab: **Kernel → Change kernel → utcp-lab (.venv)**. The notebooks in this repo default to that kernel name.
+
+**Cursor / VS Code:** use **Python: Select Interpreter** and choose `./.venv/bin/python` for the notebook (the kernel picker in the top-right of the notebook UI).
+
+**Sanity check** — in the first cell:
+
+```python
+import sys
+sys.executable
+```
+
+You should see a path ending in `utcp-lab/.venv/bin/python`.
+
+---
+
+## Three client paths
+
+All examples use the same UTCP configuration: a `manual_call_templates` entry named `demo` that points at `http://127.0.0.1:8000/utcp`. During `UtcpClient.create`, the client discovers tools from that manual (`demo.multiply`, `demo.divide`, and so on).
+
+| Path | Notebook | What it demonstrates |
+| --- | --- | --- |
+| **1. UTCP client** | [`client.ipynb`](client.ipynb) | Call a discovered tool directly with `client.call_tool`—no agent framework. |
+| **2. LangChain + `@tool`** | [`langchain_agent.ipynb`](langchain_agent.ipynb) (first section) | Wrap **one** operation (`multiply`) in a hand-written LangChain tool, then run a LangGraph-backed agent. |
+| **3. LangChain + auto-discovery** | [`langchain_agent.ipynb`](langchain_agent.ipynb) (second section) | Use `load_utcp_tools(client)` from `langchain-utcp-adapters` to expose **every** tool in the manual, including `divide`. |
+
+### 1. UTCP client (`client.ipynb`)
+
+Shows the smallest useful flow:
+
+1. Create `UtcpClient` with the `demo` call template.
+2. Rely on discovery during initialization.
+3. Invoke `demo.multiply` with `client.call_tool`.
+
+No LangChain or LLM is involved—only discovery and a native HTTP call driven by the manual.
+
+### 2. LangChain with the `@tool` annotation (`langchain_agent.ipynb`)
+
+Shows how to plug UTCP into an agent when you only want to expose specific tools:
+
+1. Create the same UTCP client.
+2. Define `multiply` with LangChain’s `@tool` decorator; inside the function, call `client.call_tool("demo.multiply", ...)`.
+3. Pass that single tool to `create_agent` and send a natural-language prompt (for example, “Calculate 6 * 7”).
+
+The agent only knows about **multiply**. It does not see `divide` unless you add another wrapper.
+
+### 3. LangChain with auto-discovery (`langchain_agent.ipynb`)
+
+Shows adapter-based conversion of the full UTCP tool catalog:
+
+1. Create the UTCP client (same config as above).
+2. `tools = await load_utcp_tools(client)` to convert all discovered tools—including **`divide`**—into LangChain `StructuredTool` instances.
+3. Pass the full list to `create_agent`.
+
+Try a prompt that chains both operations, for example: *“Multiply 12 by 12 then divide by 10.”* The agent can select multiply and divide from the automatically loaded tool set.
 
 ## How it works
 
 ```text
-client.py
+Notebooks / UtcpClient
    │
-   ├── GET /utcp ──────► Tool metadata + HTTP call template
+   ├── GET /utcp ─────────► Tool metadata (multiply, divide) + HTTP call templates
    │
-   └── GET /multiply ──► Native REST endpoint ──► {"result": 42}
+   ├── GET /multiply ─────► Native REST ──► {"result": …}
+   │
+   └── GET /divide ───────► Native REST ──► {"result": …}
 ```
 
-UTCP describes **what the tool does** and **how to call it**. The existing application remains responsible for executing the operation.
+UTCP describes **what each tool does** and **how to call it**. The FastAPI app still executes the operations. LangChain layers (manual `@tool` or `load_utcp_tools`) only change how those capabilities are presented to an LLM.
 
 ## UTCP vs. MCP: trade-offs
 
@@ -126,12 +204,13 @@ A hybrid is often the most practical option. Keep existing MCP integrations whil
 ## Notes
 
 - This is a **local learning lab**, not a production integration. It does not include authentication, authorization, or tool-manual trust controls.
-- The URLs in `app.py` and `client.py` assume the API runs locally on port `8000`.
+- URLs in `app.py` and the notebooks assume the API on port `8000` and Ollama on port `11434`.
 - Useful next steps: try OpenAPI-based discovery, add authenticated endpoints, or compare the same API wrapped in MCP.
 
 ## References
 
 - [UTCP documentation](https://www.utcp.io/docs/)
 - [Python UTCP SDK](https://github.com/universal-tool-calling-protocol/python-utcp)
+- [LangChain UTCP adapters](https://github.com/universal-tool-calling-protocol/langchain-utcp-adapters)
 - [Official UTCP vs. MCP comparison](https://www.utcp.io/utcp-vs-mcp)
 - [UTCP security considerations](https://www.utcp.io/security)
